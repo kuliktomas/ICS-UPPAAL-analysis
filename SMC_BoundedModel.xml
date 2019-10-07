@@ -1,0 +1,1439 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.1//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_2.dtd'>
+<nta>
+	<declaration>// Place global declarations here.
+const int clients_number = 5;
+typedef int[0, clients_number-1] client_Id;
+
+const int secret_number = clients_number + 1; 
+typedef int[0, secret_number-1] client_secret;
+
+const int MAXTIME = 32767;
+typedef int[0,MAXTIME] time_t;
+
+const int max_requests = 32767;
+typedef int[0, max_requests] req_number;
+
+//COMMAND definitions
+const int commands_number = 5;
+
+const int max_spd = 2;
+const int min_spd = 0;
+typedef int[0,10] speed;
+
+const int forward = 1;
+const int reverse = 2;
+
+const int speedc = 1;
+const int dirc = 2;
+
+typedef struct{
+	int Type;
+	int Value;
+	bool executed;
+	time_t timestamp; 
+}command;
+
+typedef command Commands[commands_number];
+Commands commands;
+
+//CREDENTIAL definitions
+typedef struct{
+	client_Id Id;
+	client_secret secret; 
+} credential;
+
+typedef credential Credentials[clients_number]; // is this correct?
+typedef credential ClientCreds[2]; // holds valid and invalid credential
+
+
+//LOGIN Requests definitions
+typedef struct{
+	credential cred;
+	time_t t;
+}request;
+
+typedef request LoginRequests[clients_number];
+LoginRequests loginRequests;
+
+//FIRMWARE definitions
+const int firmware_number = 2;
+typedef int[0, firmware_number-1] fw_Id;
+
+typedef struct{		
+	fw_Id Id;		//HOW to get some firmware from firmwares???
+	//bool signed;
+	//bool is_firmware;
+	//int size;
+	bool is_valid;
+    bool is_flashed;
+	time_t store_timestamp;	
+}firmware;
+firmware fir;
+
+
+//FIRMWARE Requests definitions
+typedef struct{	
+	bool running_request;		//Should these requests include token? Should we compare token expiry time with request time (I dont think so)
+	firmware firm;
+	time_t t;
+}firmware_request;
+
+typedef firmware_request Firmware_Requests[clients_number];
+Firmware_Requests firmware_Requests;
+
+
+//VIEWDATA Requests definitions
+typedef struct{
+	time_t t;
+}viewData_request;
+
+typedef viewData_request ViewData_Requests[clients_number];
+ViewData_Requests viewData_requests;
+
+
+//DATA Definitions
+typedef int Data[clients_number];
+Data data;
+
+
+//TOKEN Definitions
+typedef struct{
+	bool exist;
+	int issue_time;
+	int expiry_time;
+}token;
+
+typedef token Tokens[clients_number];
+Tokens tokens;
+
+
+//INIT
+typedef credential ValidCredentials[clients_number];
+ValidCredentials validCredentials={{0,0},{1,1},{2,2},{3,3},{4,4}};
+//CREDENTIALS for all clients
+ClientCreds client_credentials[clients_number] =  {{{0,0},{0,1}},{{1,1},{1,2}},{{2,2},{2,3}},{{3,3},{3,4}},{{4,4},{4,5}}};
+//Credentials all_credentials = {{1,1},{1,6},{6,1},{6,6}};  //HOW to do this, clientId must be represented in credentials (create all possibilities for all clients??)
+
+typedef firmware Firmwares[firmware_number];
+//Firmwares fws = {{0, true, true, 5, false, 0},{1, true, true, 8, false,0},{2, true, false, 5, false,0},
+//		 {3,false, true, 5, false, 0},{4,true, false, 8, false, 0}, {5, false, true, 8, false,0},
+//		 {6,false, false, 5, false, 0}, {7, false, false, 8, false, 0}};
+
+//Firmwares fws = {{0, true, true, false, 0}, {1, true, false, false, 0}, {2, false, true, false, 0}, {3, false, false, false, 0}};
+
+Firmwares fws = {{0, true, false, 0}, {1, false, false, 0}};
+
+clock x;
+
+//OPERATIONAL Variables
+int reset_timer;
+time_t current_time;
+const int expiry_time_offset=5;
+firmware current_FW;
+command cd;
+
+//Gateway open state
+bool is_open = false;
+//Gateway connectivity state
+int on_off;
+
+
+//Data redirection variables
+int cloudLastUpdate;
+int gwLastSync;
+bool gwPingSuccess;
+
+//DDoS constants
+const int requestThresholdDDoS = 3;
+
+//DoS constants
+const int requestThresholdDoS = 5;
+const int matching_login = 1;
+const int matching_viewData = 2;
+const int matching_sendFW = 2; 
+
+//DoS counters
+req_number requests;
+int replies;
+int replyThreshold;
+int thresholdCounter;
+
+//DoS-DDoS selector
+int requestThreshold = requestThresholdDDoS;
+
+//Data storage counter
+int dataStore; //increasing variable storing data
+
+//Data storage constants
+const int expected_frequency = 45;
+
+//Command counters
+int command_counter;
+const int trace = 5;
+
+//Command trace
+command CommandTrace[trace];
+bool malicious_trace;
+bool is_init = true;
+bool cmd_short;
+int first, second, third, fourth, fifth;
+
+//FUNCTIONS and METHODS
+
+void expire_all_tokens(){
+    int i;
+    for (i=0; i&lt;clients_number; i++)
+    {
+        tokens[i].exist = false;
+        tokens[i].issue_time = 0;
+        tokens[i].expiry_time = 0;
+
+    }
+   return;
+}
+
+void Update_replyThreshold(){
+    thresholdCounter++;
+    return;
+}
+
+void reset_command_trace(){
+    int i;
+    command cmd_array[trace];
+    command_counter = 0;
+    CommandTrace = cmd_array;
+    x = 0;
+    current_time = 0;    
+    reset_timer = 0;    
+    is_init = true;
+    malicious_trace = false;
+    return;
+}
+
+void reset_data_counter(){
+    dataStore = 0;
+    x = 0;
+    current_time = 0;    
+    reset_timer = 0;
+    cloudLastUpdate = 0;
+    gwLastSync = 0;
+    gwPingSuccess = false;
+    return;
+}
+
+void reset_all_DoS(){
+    requests = 0;
+    replies = 0;
+    replyThreshold = 0;
+    reset_timer = 0;
+    x = 0;
+    current_time = 0;
+    expire_all_tokens();
+    thresholdCounter = 0;
+}
+
+int find_index(ValidCredentials credentials, credential cred)
+{
+   int i;
+   for (i=0; i&lt;clients_number; i++)
+   {
+	 if (credentials[i] == cred)
+	 {
+	    return(1); 
+	 }
+   }
+   return(-1);
+}
+
+bool ValidCredential(client_Id Id){
+	credential cred;
+	request req = loginRequests[Id];
+	cred.Id = req.cred.Id;
+	cred.secret = loginRequests[Id].cred.secret;
+
+	if(find_index(validCredentials, cred) != -1){    // you may need to write cred instead of credential 
+		return true;
+	}
+	return false;
+}
+void IncrementRequests(){ //increment requests(DoS)
+    requests++;
+    //if(requests == max_requests){
+    //    reset_all_DoS();
+   // }
+    return;
+}
+
+void UpdateDataStore(){
+    dataStore++;
+    cloudLastUpdate = current_time;
+    return;
+}
+
+void SendLoginRequest(client_Id Id){
+    loginRequests[Id].t = current_time;
+    IncrementRequests();
+    Update_replyThreshold();
+    return;
+}
+
+void SendViewDataRequest(client_Id Id){
+    viewData_requests[Id].t = current_time;
+    IncrementRequests();
+    Update_replyThreshold();
+    return;
+}
+
+bool ValidToken(client_Id Id){
+	if(tokens[Id].exist &amp;&amp; tokens[Id].expiry_time &gt; current_time){
+		return true;
+	}
+	return false;
+}
+
+void GenerateToken(client_Id Id){
+	tokens[Id].exist = true;
+	tokens[Id].issue_time = current_time;
+	tokens[Id].expiry_time = current_time + expiry_time_offset;
+	return;
+}
+
+void receiveData(client_Id Id){
+	data[Id]++;
+	return;
+}
+
+void SendFWToGWAction(client_Id Id){
+	firmware_Requests[Id].running_request = true;
+	//firmware f = firmware_Requests[Id].firm; //There might be a better posibility to mark specific FW as sent to GW and Then reset at the end of the request
+	//current_FW = f;
+	return;
+}
+
+void SetCredential(int cred_index, client_Id Id){
+	loginRequests[Id].cred = client_credentials[Id][cred_index];
+	return;
+}
+
+void Timeout(){
+    requests--;
+}
+
+//channels
+broadcast chan SendFW[clients_number];
+broadcast chan Login[clients_number];
+broadcast chan LoginResponse[clients_number];
+broadcast chan ViewData[clients_number];
+broadcast chan DataResponse[clients_number];
+broadcast chan EmptyDataResponse[clients_number];
+broadcast chan FWRecResponse[clients_number];
+broadcast chan FWRejResponse[clients_number];
+broadcast chan NotAuthorized[clients_number];
+broadcast chan SendFWtoGW[clients_number];
+broadcast chan GWOpen[clients_number];
+broadcast chan GWClosed[clients_number];
+broadcast chan FWToOt[firmware_number];
+broadcast chan CTRData;
+broadcast chan OTData;
+broadcast chan SendCommand;
+broadcast chan FlashFW[firmware_number];
+broadcast chan FlashACK;
+broadcast chan CheckGW;
+broadcast chan RepGWOn;
+broadcast chan RepGWOff;
+broadcast chan GWData;
+broadcast chan CmdACK;
+broadcast chan GWChecked;
+
+//chan SendFW[clients_number];
+//chan Login[clients_number];
+//chan LoginResponse[clients_number];
+//chan ViewData[clients_number];
+//chan DataResponse[clients_number];
+//chan EmptyDataResponse[clients_number];
+//chan FWRecResponse[clients_number];
+//chan FWRejResponse[clients_number];
+//chan NotAuthorized[clients_number];
+//chan SendFWtoGW[clients_number];
+//chan GWOpen[clients_number];
+//chan GWClosed[clients_number];
+//chan FWToOt[firmware_number];
+//chan CTRData;
+//chan OTData;
+//chan SendCommand;
+//chan FlashFW[firmware_number];
+//chan FlashACK;
+//chan CheckGW;
+//chan RepGWOn;
+//chan RepGWOff;
+//chan GWData;
+//chan CmdACK;</declaration>
+	<template>
+		<name>DoSReset</name>
+		<declaration>const int reset_value = 16;</declaration>
+		<location id="id0" x="0" y="0">
+			<label kind="invariant" x="-144" y="17">reset_timer &lt;= reset_value</label>
+		</location>
+		<location id="id1" x="-42" y="-76">
+			<committed/>
+		</location>
+		<init ref="id0"/>
+		<transition>
+			<source ref="id1"/>
+			<target ref="id0"/>
+			<label kind="assignment" x="-127" y="-17">reset_all_DoS()</label>
+			<nail x="-136" y="-76"/>
+			<nail x="-136" y="0"/>
+		</transition>
+		<transition>
+			<source ref="id0"/>
+			<target ref="id1"/>
+			<label kind="guard" x="17" y="-93">reset_timer &gt;= reset_value</label>
+			<label kind="assignment" x="-17" y="-76">replyThreshold = thresholdCounter</label>
+			<nail x="59" y="0"/>
+			<nail x="178" y="0"/>
+			<nail x="238" y="0"/>
+			<nail x="238" y="-76"/>
+			<nail x="0" y="-76"/>
+		</transition>
+	</template>
+	<template>
+		<name>DDoSReset</name>
+		<declaration>const int reset_value = 149;
+clock stpw;</declaration>
+		<location id="id2" x="-25" y="0">
+			<name x="-102" y="8">DDoS_init</name>
+			<label kind="invariant" x="-178" y="-34">reset_timer &lt;= reset_value</label>
+			<label kind="exponentialrate" x="-68" y="-17">1:10</label>
+		</location>
+		<location id="id3" x="255" y="0">
+			<committed/>
+		</location>
+		<init ref="id2"/>
+		<transition>
+			<source ref="id3"/>
+			<target ref="id2"/>
+			<label kind="assignment" x="76" y="76">reset_all_DoS()</label>
+			<nail x="255" y="76"/>
+			<nail x="-25" y="76"/>
+		</transition>
+		<transition>
+			<source ref="id2"/>
+			<target ref="id3"/>
+			<label kind="guard" x="0" y="-17">reset_timer &gt;= reset_value</label>
+			<label kind="assignment" x="-7" y="0">replyThreshold = thresholdCounter</label>
+		</transition>
+	</template>
+	<template>
+		<name>CmdReset</name>
+		<declaration>const int reset_value = 6;</declaration>
+		<location id="id4" x="0" y="0">
+			<label kind="invariant" x="-10" y="17">reset_timer &lt;= reset_value</label>
+		</location>
+		<init ref="id4"/>
+		<transition>
+			<source ref="id4"/>
+			<target ref="id4"/>
+			<label kind="guard" x="25" y="-93">reset_timer &gt;= reset_value</label>
+			<label kind="assignment" x="25" y="-76">reset_command_trace()</label>
+			<nail x="221" y="0"/>
+			<nail x="221" y="-76"/>
+			<nail x="0" y="-76"/>
+		</transition>
+	</template>
+	<template>
+		<name>DataReset</name>
+		<declaration>const int reset_value = 10; // there has to be at least one update within this time</declaration>
+		<location id="id5" x="0" y="0">
+			<label kind="invariant" x="-127" y="17">reset_timer &lt;= reset_value</label>
+		</location>
+		<init ref="id5"/>
+		<transition>
+			<source ref="id5"/>
+			<target ref="id5"/>
+			<label kind="guard" x="-8" y="-85">reset_timer &gt;= reset_value</label>
+			<label kind="assignment" x="17" y="-68">reset_data_counter()</label>
+			<nail x="170" y="0"/>
+			<nail x="170" y="-68"/>
+			<nail x="0" y="-68"/>
+		</transition>
+	</template>
+	<template>
+		<name x="5" y="5">Client</name>
+		<parameter>const client_Id myId</parameter>
+		<declaration>bool access_granted;
+int firmware_Id;
+clock duration;
+clock stpw;
+const int fw_duration = 2;
+
+void DetermineAccess(client_Id Id){
+	if (tokens[Id].exist == true){
+		access_granted = true;	
+	}else{
+		access_granted = false;
+	}
+	return;
+}
+
+void SendFirmware(client_Id Id){
+    //current_time = current_time + fw_duration;
+	firmware_Requests[Id].t = current_time;
+	firmware_Requests[Id].firm = fws[firmware_Id];
+    IncrementRequests();
+    Update_replyThreshold();
+	return;
+}</declaration>
+		<location id="id6" x="416" y="204">
+			<name x="406" y="170">s4</name>
+			<label kind="exponentialrate" x="407" y="215">1:1</label>
+		</location>
+		<location id="id7" x="-136" y="85">
+			<name x="-146" y="51">s1</name>
+			<label kind="invariant" x="-146" y="100">duration &lt;= fw_duration</label>
+		</location>
+		<location id="id8" x="-374" y="237">
+			<name x="-384" y="203">s3</name>
+			<label kind="exponentialrate" x="-416" y="255">1:1</label>
+		</location>
+		<location id="id9" x="-382" y="85">
+			<name x="-392" y="51">s2</name>
+			<label kind="exponentialrate" x="-425" y="85">1:1</label>
+		</location>
+		<location id="id10" x="620" y="127">
+			<name x="629" y="101">s5</name>
+			<label kind="exponentialrate" x="637" y="135">1:1</label>
+		</location>
+		<location id="id11" x="152" y="137">
+			<name x="170" y="119">s_init</name>
+			<label kind="exponentialrate" x="170" y="144">1:1</label>
+		</location>
+		<location id="id12" x="306" y="76">
+			<label kind="invariant" x="296" y="93">duration &lt;= 2</label>
+		</location>
+		<location id="id13" x="-34" y="433">
+			<label kind="invariant" x="-44" y="450">duration &lt;= 1</label>
+		</location>
+		<location id="id14" x="-17" y="357">
+			<label kind="invariant" x="-26" y="374">duration &lt;= 1</label>
+		</location>
+		<location id="id15" x="8" y="297">
+			<label kind="invariant" x="-2" y="314">duration &lt;= 2</label>
+		</location>
+		<location id="id16" x="25" y="-8">
+			<label kind="invariant" x="34" y="8">duration &lt;= 2</label>
+		</location>
+		<location id="id17" x="42" y="-42">
+			<label kind="invariant" x="-51" y="-76">duration &lt;= 1</label>
+		</location>
+		<location id="id18" x="-59" y="195">
+			<label kind="invariant" x="-69" y="212">duration &lt;=5</label>
+		</location>
+		<location id="id19" x="-297" y="170">
+			<label kind="invariant" x="-289" y="153">duration &lt;=5</label>
+		</location>
+		<location id="id20" x="382" y="-17">
+			<label kind="invariant" x="372" y="0">duration &lt;=5</label>
+		</location>
+		<init ref="id11"/>
+		<transition>
+			<source ref="id20"/>
+			<target ref="id11"/>
+			<label kind="guard" x="221" y="-34">duration &gt;= 5</label>
+			<nail x="195" y="-17"/>
+		</transition>
+		<transition>
+			<source ref="id10"/>
+			<target ref="id20"/>
+			<label kind="assignment" x="442" y="-34">Timeout(), duration = 0</label>
+			<nail x="671" y="127"/>
+			<nail x="671" y="-17"/>
+		</transition>
+		<transition>
+			<source ref="id19"/>
+			<target ref="id11"/>
+			<label kind="guard" x="-136" y="153">duration &gt;= 5</label>
+			<nail x="68" y="170"/>
+		</transition>
+		<transition>
+			<source ref="id9"/>
+			<target ref="id19"/>
+			<label kind="assignment" x="-476" y="178">Timeout(), duration = 0</label>
+			<nail x="-459" y="170"/>
+		</transition>
+		<transition>
+			<source ref="id18"/>
+			<target ref="id11"/>
+			<label kind="guard" x="-42" y="178">duration &gt;= 5</label>
+			<nail x="93" y="195"/>
+		</transition>
+		<transition>
+			<source ref="id8"/>
+			<target ref="id18"/>
+			<label kind="assignment" x="-272" y="178">Timeout(), duration = 0</label>
+			<nail x="-306" y="195"/>
+		</transition>
+		<transition>
+			<source ref="id17"/>
+			<target ref="id11"/>
+			<label kind="guard" x="68" y="-59">duration &gt;= 1</label>
+			<nail x="178" y="-42"/>
+		</transition>
+		<transition>
+			<source ref="id16"/>
+			<target ref="id11"/>
+			<label kind="guard" x="42" y="-25">duration &gt;= 2</label>
+			<nail x="144" y="-8"/>
+		</transition>
+		<transition>
+			<source ref="id15"/>
+			<target ref="id11"/>
+			<label kind="guard" x="34" y="280">duration &gt;= 2</label>
+			<nail x="136" y="221"/>
+		</transition>
+		<transition>
+			<source ref="id14"/>
+			<target ref="id11"/>
+			<label kind="guard" x="8" y="340">duration &gt;= 1</label>
+			<nail x="144" y="357"/>
+		</transition>
+		<transition>
+			<source ref="id13"/>
+			<target ref="id11"/>
+			<label kind="guard" x="17" y="408">duration&gt;=1</label>
+			<nail x="204" y="433"/>
+		</transition>
+		<transition>
+			<source ref="id12"/>
+			<target ref="id11"/>
+			<label kind="guard" x="195" y="76">duration &gt;= 2</label>
+			<nail x="187" y="76"/>
+		</transition>
+		<transition>
+			<source ref="id8"/>
+			<target ref="id13"/>
+			<label kind="synchronisation" x="-323" y="408">EmptyDataResponse[myId]?</label>
+			<label kind="assignment" x="-340" y="433">replies = replies + matching_viewData,
+duration = 0</label>
+			<nail x="-365" y="433"/>
+			<nail x="-246" y="433"/>
+			<nail x="-93" y="433"/>
+			<nail x="-59" y="433"/>
+		</transition>
+		<transition>
+			<source ref="id11"/>
+			<target ref="id6"/>
+			<label kind="select" x="192" y="185">cred_index:int[0,1]</label>
+			<label kind="assignment" x="170" y="204">SetCredential(cred_index, myId)</label>
+			<nail x="170" y="204"/>
+		</transition>
+		<transition>
+			<source ref="id7"/>
+			<target ref="id9"/>
+			<label kind="guard" x="-323" y="51">duration &gt;= fw_duration</label>
+			<label kind="synchronisation" x="-306" y="68">SendFW[myId]!</label>
+			<label kind="assignment" x="-314" y="85">SendFirmware(myId)</label>
+		</transition>
+		<transition>
+			<source ref="id11"/>
+			<target ref="id7"/>
+			<label kind="select" x="-88" y="65">f_Id:int[0,1]</label>
+			<label kind="assignment" x="-102" y="85">firmware_Id = f_Id,duration = 0</label>
+			<nail x="119" y="85"/>
+		</transition>
+		<transition>
+			<source ref="id9"/>
+			<target ref="id17"/>
+			<label kind="synchronisation" x="-238" y="-59">FWRejResponse[myId]?</label>
+			<label kind="assignment" x="-246" y="-42">replies = replies + matching_sendFW,
+duration = 0</label>
+			<nail x="-246" y="-43"/>
+			<nail x="25" y="-42"/>
+			<nail x="25" y="-42"/>
+		</transition>
+		<transition>
+			<source ref="id8"/>
+			<target ref="id14"/>
+			<label kind="synchronisation" x="-289" y="323">NotAuthorized[myId]?</label>
+			<label kind="assignment" x="-323" y="340">access_granted=false, 
+replies = replies + matching_viewData,
+duration = 0</label>
+			<nail x="-340" y="340"/>
+			<nail x="-144" y="340"/>
+			<nail x="-76" y="340"/>
+		</transition>
+		<transition>
+			<source ref="id8"/>
+			<target ref="id15"/>
+			<label kind="synchronisation" x="-306" y="255">DataResponse[myId]?</label>
+			<label kind="assignment" x="-331" y="272">receiveData(myId), duration = 0,
+replies = replies + matching_viewData</label>
+			<nail x="-348" y="272"/>
+			<nail x="-144" y="272"/>
+			<nail x="-42" y="272"/>
+			<nail x="-17" y="272"/>
+		</transition>
+		<transition>
+			<source ref="id11"/>
+			<target ref="id8"/>
+			<label kind="synchronisation" x="-255" y="212">ViewData[myId]!</label>
+			<label kind="assignment" x="-306" y="229">SendViewDataRequest(myId)</label>
+			<nail x="102" y="229"/>
+			<nail x="-323" y="229"/>
+		</transition>
+		<transition>
+			<source ref="id9"/>
+			<target ref="id11"/>
+			<label kind="synchronisation" x="-280" y="119">NotAuthorized[myId]?</label>
+			<label kind="assignment" x="-374" y="136">access_granted=false, replies = replies + matching_sendFW</label>
+			<nail x="-365" y="136"/>
+			<nail x="-85" y="136"/>
+		</transition>
+		<transition>
+			<source ref="id9"/>
+			<target ref="id16"/>
+			<label kind="synchronisation" x="-255" y="-8">FWRecResponse[myId]?</label>
+			<label kind="assignment" x="-255" y="8">replies = replies + matching_sendFW,
+duration = 0</label>
+			<nail x="-263" y="8"/>
+			<nail x="0" y="8"/>
+		</transition>
+		<transition>
+			<source ref="id10"/>
+			<target ref="id12"/>
+			<label kind="synchronisation" x="374" y="76">LoginResponse[myId]?</label>
+			<label kind="assignment" x="357" y="34">DetermineAccess(myId), duration =0,
+replies = replies + matching_login</label>
+			<nail x="620" y="76"/>
+			<nail x="340" y="76"/>
+			<nail x="340" y="76"/>
+		</transition>
+		<transition>
+			<source ref="id6"/>
+			<target ref="id10"/>
+			<label kind="synchronisation" x="476" y="178">Login[myId]!</label>
+			<label kind="assignment" x="433" y="204">SendLoginRequest(myId)</label>
+			<nail x="448" y="201"/>
+			<nail x="620" y="204"/>
+		</transition>
+	</template>
+	<template>
+		<name>Time_Discretizer</name>
+		<declaration>//clock x;
+void increment_time(){
+    current_time++;
+    reset_timer++;
+}</declaration>
+		<location id="id21" x="-64" y="0">
+			<label kind="invariant" x="-120" y="16">x&lt;=current_time + 1</label>
+		</location>
+		<init ref="id21"/>
+		<transition>
+			<source ref="id21"/>
+			<target ref="id21"/>
+			<label kind="guard" x="-25" y="-59">x&gt;=current_time + 1</label>
+			<label kind="assignment" x="-17" y="-42">increment_time()</label>
+			<nail x="-48" y="-40"/>
+			<nail x="178" y="-42"/>
+			<nail x="178" y="0"/>
+		</transition>
+	</template>
+	<template>
+		<name>Cloud</name>
+		<declaration>int recent_Id;
+firmware FW;
+bool gw_accessible;
+clock duration; //duration of actions
+clock stpw;
+const int view_duration = 1;
+const int generate_duration = 2;
+const int upload_data_timeout = 5; // timeout for data upload from OT
+
+bool HasData(){
+	return dataStore &gt; 0;
+}
+
+void AdvanceTime(int time){
+    current_time = current_time + time;
+}
+
+void CheckGWState(){
+    if (on_off == true){
+        gwPingSuccess = true;
+    }else{
+        gwPingSuccess = false;
+    }
+}</declaration>
+		<location id="id22" x="-340" y="314">
+			<committed/>
+		</location>
+		<location id="id23" x="-348" y="144">
+			<label kind="exponentialrate" x="-357" y="110">1:1</label>
+			<committed/>
+		</location>
+		<location id="id24" x="-357" y="-127">
+			<committed/>
+		</location>
+		<location id="id25" x="238" y="289">
+			<committed/>
+		</location>
+		<location id="id26" x="192" y="-40">
+			<committed/>
+		</location>
+		<location id="id27" x="-80" y="-40">
+			<label kind="invariant" x="-51" y="-34">dataStore &gt;= 0</label>
+			<label kind="exponentialrate" x="-90" y="-6">1:1</label>
+		</location>
+		<location id="id28" x="68" y="-153">
+			<committed/>
+		</location>
+		<init ref="id27"/>
+		<transition>
+			<source ref="id27"/>
+			<target ref="id27"/>
+			<label kind="synchronisation" x="-340" y="8">GWChecked?</label>
+			<label kind="assignment" x="-340" y="34">CheckGWState()</label>
+			<nail x="-170" y="25"/>
+			<nail x="-348" y="25"/>
+			<nail x="-348" y="59"/>
+			<nail x="-144" y="59"/>
+		</transition>
+		<transition>
+			<source ref="id27"/>
+			<target ref="id27"/>
+			<label kind="synchronisation" x="-238" y="-17">CheckGW!</label>
+			<nail x="-119" y="-17"/>
+			<nail x="-144" y="0"/>
+			<nail x="-374" y="0"/>
+		</transition>
+		<transition>
+			<source ref="id28"/>
+			<target ref="id27"/>
+			<label kind="synchronisation" x="-59" y="-127">LoginResponse[recent_Id]!</label>
+			<nail x="42" y="-127"/>
+			<nail x="-76" y="-127"/>
+		</transition>
+		<transition>
+			<source ref="id24"/>
+			<target ref="id27"/>
+			<label kind="guard" x="-357" y="-204">!HasData() &amp;&amp; ValidToken(recent_Id)</label>
+			<label kind="synchronisation" x="-348" y="-187">EmptyDataResponse[recent_Id]!</label>
+			<nail x="-357" y="-187"/>
+			<nail x="-102" y="-187"/>
+		</transition>
+		<transition>
+			<source ref="id27"/>
+			<target ref="id27"/>
+			<label kind="synchronisation" x="8" y="51">GWData?</label>
+			<label kind="assignment" x="-25" y="34">UpdateDataStore()</label>
+			<nail x="-25" y="8"/>
+			<nail x="119" y="25"/>
+			<nail x="119" y="51"/>
+			<nail x="-25" y="51"/>
+		</transition>
+		<transition>
+			<source ref="id22"/>
+			<target ref="id27"/>
+			<label kind="guard" x="-255" y="297">is_open == false</label>
+			<label kind="synchronisation" x="-272" y="314">FWRejResponse[recent_Id]!</label>
+			<nail x="0" y="314"/>
+			<nail x="51" y="229"/>
+		</transition>
+		<transition>
+			<source ref="id22"/>
+			<target ref="id27"/>
+			<label kind="guard" x="-263" y="229">is_open == true</label>
+			<label kind="synchronisation" x="-280" y="246">FWRecResponse[recent_Id]!</label>
+			<nail x="-297" y="246"/>
+			<nail x="17" y="246"/>
+		</transition>
+		<transition>
+			<source ref="id23"/>
+			<target ref="id22"/>
+			<label kind="guard" x="-578" y="110">ValidToken(recent_Id)</label>
+			<label kind="synchronisation" x="-586" y="127">SendFWtoGW[recent_Id]!</label>
+			<label kind="assignment" x="-612" y="153">SendFWToGWAction(recent_Id)</label>
+			<nail x="-620" y="144"/>
+			<nail x="-620" y="314"/>
+		</transition>
+		<transition>
+			<source ref="id23"/>
+			<target ref="id27"/>
+			<label kind="guard" x="-289" y="187">!ValidToken(recent_Id)</label>
+			<label kind="synchronisation" x="-289" y="204">NotAuthorized[recent_Id]!</label>
+			<nail x="-348" y="204"/>
+			<nail x="-68" y="204"/>
+		</transition>
+		<transition>
+			<source ref="id27"/>
+			<target ref="id23"/>
+			<label kind="select" x="-246" y="119">Id:int[0,2]</label>
+			<label kind="synchronisation" x="-255" y="144">SendFW[Id]?</label>
+			<label kind="assignment" x="-255" y="161">recent_Id=Id</label>
+			<nail x="-93" y="144"/>
+		</transition>
+		<transition>
+			<source ref="id24"/>
+			<target ref="id27"/>
+			<label kind="guard" x="-544" y="-59">!ValidToken(recent_Id)</label>
+			<label kind="synchronisation" x="-544" y="-42">NotAuthorized[recent_Id]!</label>
+			<nail x="-552" y="-127"/>
+			<nail x="-552" y="-42"/>
+			<nail x="-246" y="-42"/>
+			<nail x="-127" y="-42"/>
+		</transition>
+		<transition>
+			<source ref="id24"/>
+			<target ref="id27"/>
+			<label kind="guard" x="-425" y="-85">HasData() &amp;&amp; ValidToken(recent_Id)</label>
+			<label kind="synchronisation" x="-365" y="-68">DataResponse[recent_Id]!</label>
+			<nail x="-510" y="-102"/>
+			<nail x="-510" y="-68"/>
+			<nail x="-119" y="-68"/>
+		</transition>
+		<transition>
+			<source ref="id27"/>
+			<target ref="id24"/>
+			<label kind="select" x="-272" y="-144">Id:int[0,2]</label>
+			<label kind="synchronisation" x="-280" y="-127">ViewData[Id]?</label>
+			<label kind="assignment" x="-323" y="-110">recent_Id=Id, duration = 0</label>
+			<nail x="-136" y="-128"/>
+		</transition>
+		<transition>
+			<source ref="id26"/>
+			<target ref="id28"/>
+			<label kind="guard" x="102" y="-170">!ValidCredential(recent_Id)</label>
+			<label kind="assignment" x="136" y="-153">duration = 0</label>
+			<nail x="263" y="-153"/>
+			<nail x="238" y="-153"/>
+			<nail x="102" y="-153"/>
+			<nail x="102" y="-153"/>
+		</transition>
+		<transition>
+			<source ref="id25"/>
+			<target ref="id27"/>
+			<label kind="synchronisation" x="25" y="289">LoginResponse[recent_Id]!</label>
+			<nail x="51" y="289"/>
+			<nail x="136" y="119"/>
+			<nail x="153" y="85"/>
+			<nail x="110" y="-42"/>
+		</transition>
+		<transition>
+			<source ref="id26"/>
+			<target ref="id25"/>
+			<label kind="guard" x="204" y="-59">ValidCredential(recent_Id)</label>
+			<label kind="assignment" x="119" y="-25">GenerateToken(recent_Id), duration = 0</label>
+			<nail x="221" y="-42"/>
+			<nail x="416" y="-42"/>
+		</transition>
+		<transition>
+			<source ref="id27"/>
+			<target ref="id26"/>
+			<label kind="select" x="8" y="-93">Id:int[0,2]</label>
+			<label kind="synchronisation" x="8" y="-80">Login[Id]?</label>
+			<label kind="assignment" x="-8" y="-64">recent_Id=Id</label>
+			<nail x="-56" y="-64"/>
+			<nail x="152" y="-64"/>
+		</transition>
+	</template>
+	<template>
+		<name>Gateway</name>
+		<declaration>client_Id recent_Id;
+clock duration;
+clock stpw;
+
+int getFirmwareId(client_Id Id){
+	int fw_Id = firmware_Requests[Id].firm.Id;
+	return fw_Id;
+}
+//Once the firmware is delivered and acknowledgement is received the request is done
+void closeFWRequest(client_Id Id){
+	firmware_Requests[Id].running_request = false;
+	return; 
+}
+
+void Toggle(){
+	is_open = !is_open;
+    //duration = 0;
+}</declaration>
+		<location id="id29" x="400" y="48">
+			<label kind="exponentialrate" x="391" y="68">1:1</label>
+			<committed/>
+		</location>
+		<location id="id30" x="256" y="-32">
+			<label kind="exponentialrate" x="255" y="-59">1:1</label>
+		</location>
+		<location id="id31" x="0" y="0">
+			<name x="8" y="-25">GW_init</name>
+			<label kind="exponentialrate" x="-25" y="-42">1:1</label>
+		</location>
+		<location id="id32" x="-246" y="93">
+			<label kind="exponentialrate" x="-238" y="102">1:1</label>
+		</location>
+		<init ref="id31"/>
+		<transition>
+			<source ref="id31"/>
+			<target ref="id31"/>
+			<label kind="assignment" x="-187" y="-76">Toggle()</label>
+			<nail x="-102" y="-25"/>
+			<nail x="-246" y="-25"/>
+			<nail x="-246" y="-59"/>
+			<nail x="-85" y="-59"/>
+		</transition>
+		<transition>
+			<source ref="id32"/>
+			<target ref="id31"/>
+			<label kind="synchronisation" x="-144" y="76">GWData!</label>
+			<nail x="-136" y="93"/>
+			<nail x="0" y="93"/>
+		</transition>
+		<transition>
+			<source ref="id31"/>
+			<target ref="id32"/>
+			<label kind="synchronisation" x="-144" y="-17">OTData?</label>
+			<label kind="assignment" x="-221" y="0">gwLastSync = current_time</label>
+			<nail x="-246" y="0"/>
+		</transition>
+		<transition>
+			<source ref="id29"/>
+			<target ref="id31"/>
+			<label kind="assignment" x="102" y="34">closeFWRequest(recent_Id)</label>
+			<nail x="365" y="51"/>
+			<nail x="85" y="51"/>
+		</transition>
+		<transition>
+			<source ref="id30"/>
+			<target ref="id31"/>
+			<label kind="guard" x="72" y="-8">is_open == false</label>
+			<nail x="256" y="8"/>
+			<nail x="40" y="8"/>
+		</transition>
+		<transition>
+			<source ref="id30"/>
+			<target ref="id29"/>
+			<label kind="guard" x="336" y="-48">is_open == true</label>
+			<label kind="synchronisation" x="280" y="-32">FWToOt[getFirmwareId(recent_Id)]!</label>
+			<nail x="552" y="-32"/>
+			<nail x="552" y="48"/>
+		</transition>
+		<transition>
+			<source ref="id31"/>
+			<target ref="id30"/>
+			<label kind="select" x="64" y="-72">Id:int[0,2]</label>
+			<label kind="synchronisation" x="42" y="-51">SendFWtoGW[Id]?</label>
+			<label kind="assignment" x="48" y="-40">recent_Id = Id</label>
+			<nail x="8" y="-51"/>
+			<nail x="232" y="-56"/>
+		</transition>
+	</template>
+	<template>
+		<name>GW_Internal</name>
+		<declaration>clock duration;
+const int on = 1;
+const int off = 0;
+</declaration>
+		<location id="id33" x="0" y="0">
+			<name x="34" y="-17">GW_int_init</name>
+			<label kind="exponentialrate" x="-17" y="-34">1:1</label>
+		</location>
+		<location id="id34" x="-59" y="102">
+			<name x="-110" y="68">GW_Int1</name>
+			<label kind="invariant" x="-93" y="119">duration &lt;= 2</label>
+		</location>
+		<location id="id35" x="-297" y="102">
+			<committed/>
+		</location>
+		<init ref="id33"/>
+		<transition>
+			<source ref="id35"/>
+			<target ref="id34"/>
+			<label kind="select" x="-263" y="85">acc: int[off,on]</label>
+			<label kind="assignment" x="-255" y="102">on_off = acc,
+duration = 0</label>
+		</transition>
+		<transition>
+			<source ref="id34"/>
+			<target ref="id33"/>
+			<label kind="guard" x="-41" y="68">duration &gt;= 2</label>
+			<label kind="synchronisation" x="-41" y="85">GWChecked!</label>
+			<nail x="68" y="102"/>
+			<nail x="68" y="0"/>
+		</transition>
+		<transition>
+			<source ref="id33"/>
+			<target ref="id35"/>
+			<label kind="synchronisation" x="-203" y="-17">CheckGW?</label>
+			<nail x="-221" y="0"/>
+			<nail x="-297" y="0"/>
+			<nail x="-297" y="85"/>
+		</transition>
+	</template>
+	<template>
+		<name>OT</name>
+		<declaration>int firmware_Id;
+int installed_FWId = -1;
+int storage_size = 7;
+bool usb_plugged_in;
+command cmd;
+clock duration; //duration of actions
+clock stpw;
+bool command_mode_off = true;
+
+bool validFW(int FWId){
+	//if(fws[FWId].signed == true &amp;&amp; fws[FWId].is_firmware==true &amp;&amp; fws[FWId].size &lt;= storage_size){
+    if(fws[FWId].is_valid == true){
+		return true;
+	}
+	return false;
+}
+
+void SetCommandValue(int val){
+	cmd.Value = val;
+	cmd.timestamp = current_time;
+	return;
+}</declaration>
+		<location id="id36" x="-289" y="-25">
+			<name x="-299" y="-59">OT3</name>
+			<label kind="exponentialrate" x="-280" y="-8">1:1</label>
+		</location>
+		<location id="id37" x="-504" y="32">
+			<name x="-544" y="0">OT4</name>
+			<label kind="exponentialrate" x="-535" y="42">1:1</label>
+		</location>
+		<location id="id38" x="-289" y="-204">
+			<name x="-299" y="-238">OT1</name>
+			<label kind="invariant" x="-297" y="-187">duration &lt;= 2</label>
+		</location>
+		<location id="id39" x="280" y="-102">
+			<name x="297" y="-144">OT6</name>
+			<label kind="exponentialrate" x="297" y="-93">1:1</label>
+		</location>
+		<location id="id40" x="-64" y="-104">
+			<name x="-51" y="-127">OT_init</name>
+			<label kind="exponentialrate" x="-51" y="-85">1:1</label>
+		</location>
+		<init ref="id40"/>
+		<transition>
+			<source ref="id40"/>
+			<target ref="id40"/>
+			<label kind="synchronisation" x="-34" y="68">CmdACK?</label>
+			<nail x="-102" y="85"/>
+			<nail x="263" y="85"/>
+			<nail x="263" y="59"/>
+			<nail x="-76" y="59"/>
+		</transition>
+		<transition>
+			<source ref="id40"/>
+			<target ref="id40"/>
+			<label kind="synchronisation" x="-323" y="-85">FlashACK?</label>
+			<nail x="-127" y="-85"/>
+			<nail x="-331" y="-85"/>
+			<nail x="-331" y="-68"/>
+			<nail x="-110" y="-68"/>
+		</transition>
+		<transition>
+			<source ref="id36"/>
+			<target ref="id37"/>
+			<label kind="select" x="-472" y="0">dir: int[forward,reverse]</label>
+			<label kind="guard" x="-456" y="16">cmd.Type == dirc</label>
+			<label kind="assignment" x="-472" y="32">SetCommandValue(dir)</label>
+			<nail x="-288" y="32"/>
+			<nail x="-464" y="32"/>
+		</transition>
+		<transition>
+			<source ref="id36"/>
+			<target ref="id37"/>
+			<label kind="select" x="-501" y="-59">spd: int[min_spd,max_spd]</label>
+			<label kind="guard" x="-484" y="-42">cmd.Type == speedc</label>
+			<label kind="assignment" x="-484" y="-25">SetCommandValue(spd)</label>
+			<nail x="-501" y="-25"/>
+		</transition>
+		<transition>
+			<source ref="id40"/>
+			<target ref="id36"/>
+			<label kind="select" x="-263" y="-42">c_type:int[speedc, dirc]</label>
+			<label kind="assignment" x="-246" y="-25">cmd.Type = c_type,
+duration = 0</label>
+			<nail x="-85" y="-68"/>
+			<nail x="-93" y="-25"/>
+		</transition>
+		<transition>
+			<source ref="id40"/>
+			<target ref="id40"/>
+			<label kind="guard" x="-348" y="-153">installed_FWId &gt; 0</label>
+			<label kind="synchronisation" x="-348" y="-136">FlashFW[installed_FWId]!</label>
+			<nail x="-153" y="-136"/>
+			<nail x="-357" y="-136"/>
+			<nail x="-357" y="-102"/>
+		</transition>
+		<transition>
+			<source ref="id37"/>
+			<target ref="id40"/>
+			<label kind="synchronisation" x="-442" y="68">SendCommand!</label>
+			<label kind="assignment" x="-433" y="85">cd = cmd</label>
+			<nail x="-456" y="88"/>
+			<nail x="-289" y="85"/>
+			<nail x="-127" y="85"/>
+		</transition>
+		<transition>
+			<source ref="id38"/>
+			<target ref="id40"/>
+			<label kind="guard" x="-187" y="-178">duration &gt;= 2</label>
+			<label kind="synchronisation" x="-178" y="-161">OTData!</label>
+			<nail x="-323" y="-161"/>
+			<nail x="-85" y="-161"/>
+		</transition>
+		<transition>
+			<source ref="id40"/>
+			<target ref="id38"/>
+			<label kind="synchronisation" x="-178" y="-221">CTRData?</label>
+			<label kind="assignment" x="-187" y="-204">duration = 0</label>
+			<nail x="-68" y="-204"/>
+		</transition>
+		<transition>
+			<source ref="id40"/>
+			<target ref="id39"/>
+			<label kind="select" x="68" y="-187">f_Id:int[0,1]</label>
+			<label kind="assignment" x="-17" y="-170">usb_plugged_in = true, firmware_Id = f_Id</label>
+			<nail x="-17" y="-170"/>
+			<nail x="306" y="-170"/>
+			<nail x="289" y="-136"/>
+			<nail x="280" y="-127"/>
+		</transition>
+		<transition>
+			<source ref="id39"/>
+			<target ref="id40"/>
+			<label kind="guard" x="17" y="8">validFW(firmware_Id)</label>
+			<label kind="assignment" x="-8" y="25">installed_FWId = firmware_Id</label>
+			<nail x="289" y="-93"/>
+			<nail x="289" y="25"/>
+			<nail x="229" y="25"/>
+			<nail x="-51" y="25"/>
+		</transition>
+		<transition>
+			<source ref="id39"/>
+			<target ref="id40"/>
+			<label kind="guard" x="8" y="-59">!validFW(firmware_Id)</label>
+			<nail x="238" y="-42"/>
+			<nail x="-48" y="-40"/>
+		</transition>
+		<transition>
+			<source ref="id40"/>
+			<target ref="id39"/>
+			<label kind="select" x="34" y="-136">f_Id:int[0,1]</label>
+			<label kind="synchronisation" x="25" y="-119">FWToOt[f_Id]?</label>
+			<label kind="assignment" x="17" y="-102">firmware_Id = f_Id</label>
+		</transition>
+	</template>
+	<template>
+		<name>CTR</name>
+		<declaration>int firmware_Id;
+clock duration; //duration for the CTR actions
+clock stpw;
+const int time_delay = 1;
+
+int getOldestIssuedCommand(){
+	int c = 0;
+	int i;
+	int oldest = 0;
+	for(i = 1; i &lt; trace - 1; i++){
+		if (CommandTrace[oldest].timestamp &gt; CommandTrace[i].timestamp){
+			oldest = i;
+		}
+	}
+	return oldest;
+}
+
+void sortTrace(){
+	int i,j;
+	command larger;
+        for (i = 0; i &lt; trace; ++i) 
+        {
+            for (j = i + 1; j &lt; trace; ++j)
+            {
+                if (CommandTrace[i].timestamp &gt; CommandTrace[j].timestamp) 
+                {
+                    larger = CommandTrace[i];
+                    CommandTrace[i] = CommandTrace[j];
+                    CommandTrace[j] = larger;
+                }
+            }
+        }
+	return;
+}
+
+void ExecuteCommand(){
+    cd.executed = true;
+    CommandTrace[command_counter] = cd;
+    command_counter++;
+    return;
+}
+
+int Wrap(int current){
+    if((current + 1) &gt; trace -1){
+        return 0;
+    }
+    return current + 1;
+}
+
+void SetPropertyIndices(int oldest){
+    first = Wrap(oldest); // here oldest actually becomes newest
+    second = Wrap(first);
+    third = Wrap(second);
+    fourth = Wrap(third);
+    fifth = Wrap(fourth);
+    return;
+}
+
+bool IsMaliciousTrace(){
+    bool is_short;
+    int i = 0;
+    if((CommandTrace[first].timestamp - CommandTrace[second].timestamp) &lt;= time_delay &amp;&amp; (CommandTrace[second].timestamp - CommandTrace[third].timestamp) &lt;= time_delay 
+      &amp;&amp; CommandTrace[third].timestamp - CommandTrace[fourth].timestamp &lt;= time_delay &amp;&amp; CommandTrace[fourth].timestamp - CommandTrace[fifth].timestamp &lt;= time_delay){
+      is_short = true;  
+    } 
+    cmd_short = is_short;
+    if(CommandTrace[first].executed &amp;&amp; is_short){
+        if(((CommandTrace[first].Type == speedc) &amp;&amp; (CommandTrace[first].Value == min_spd)) &amp;&amp; ((CommandTrace[second].Type == speedc) &amp;&amp; (CommandTrace[second].Value == max_spd)) 
+            &amp;&amp; ((CommandTrace[third].Type == speedc) &amp;&amp; (CommandTrace[third].Value == min_spd)) &amp;&amp; ((CommandTrace[fourth].Type == speedc) &amp;&amp; (CommandTrace[fourth].Value == max_spd)) 
+            &amp;&amp; ((CommandTrace[fifth].Type == speedc) &amp;&amp; (CommandTrace[fifth].Value == min_spd))){ // sequence 1, min to max power continuously
+            return true;
+        }
+        else if(((CommandTrace[first].Type == speedc) &amp;&amp; (CommandTrace[first].Value == max_spd)) &amp;&amp; ((CommandTrace[second].Type == speedc) &amp;&amp; (CommandTrace[second].Value == min_spd)) 
+            &amp;&amp; ((CommandTrace[third].Type == speedc) &amp;&amp; (CommandTrace[third].Value == max_spd)) &amp;&amp; ((CommandTrace[fourth].Type == speedc) &amp;&amp; (CommandTrace[fourth].Value == min_spd)) 
+            &amp;&amp; ((CommandTrace[fifth].Type == speedc) &amp;&amp; (CommandTrace[fifth].Value == max_spd))){ // sequence 1, the other way around
+            return true;  
+        }
+        else if(((CommandTrace[first].Type == dirc) &amp;&amp; (CommandTrace[first].Value == forward)) &amp;&amp; ((CommandTrace[second].Type == dirc) &amp;&amp; (CommandTrace[second].Value == reverse))
+            &amp;&amp; ((CommandTrace[third].Type == dirc) &amp;&amp; (CommandTrace[third].Value == forward)) &amp;&amp; ((CommandTrace[fourth].Type == dirc) &amp;&amp; (CommandTrace[fourth].Value == reverse))
+            &amp;&amp; ((CommandTrace[fifth].Type == dirc) &amp;&amp; (CommandTrace[fifth].Value == forward))){ // sequence 2, forward -&gt; reverse continuously
+            return true;
+        }
+        else if(((CommandTrace[first].Type == dirc) &amp;&amp; (CommandTrace[first].Value == reverse)) &amp;&amp; ((CommandTrace[second].Type == dirc) &amp;&amp; (CommandTrace[second].Value == forward))
+            &amp;&amp; ((CommandTrace[third].Type == dirc) &amp;&amp; (CommandTrace[third].Value == reverse)) &amp;&amp; ((CommandTrace[fourth].Type == dirc) &amp;&amp; (CommandTrace[fourth].Value == forward))
+            &amp;&amp; ((CommandTrace[fifth].Type == dirc) &amp;&amp; (CommandTrace[fifth].Value == reverse))){ // sequence 2, reverse -&gt; forward continuously
+            return true;
+        }
+    }
+	return false;
+}
+
+void HandleCommand(){
+    duration = 0;
+	if(is_init == true){
+		if (command_counter == trace - 1){
+			cd.executed = true;
+			CommandTrace[command_counter] = cd;
+			is_init = false;
+		}else{
+			cd.executed = true;
+			CommandTrace[command_counter] = cd;
+            command_counter++;
+		}
+	}else{
+		int oldest = getOldestIssuedCommand();
+		CommandTrace[oldest] = cd;
+        SetPropertyIndices(oldest);
+        malicious_trace = IsMaliciousTrace(); //raise malicious trace
+	}
+	return;
+}
+</declaration>
+		<location id="id41" x="-616" y="-200">
+			<label kind="invariant" x="-688" y="-229">duration &lt;= 3</label>
+		</location>
+		<location id="id42" x="-360" y="-200">
+			<name x="-382" y="-238">CTR_init</name>
+			<label kind="exponentialrate" x="-357" y="-170">1:1</label>
+		</location>
+		<location id="id43" x="-127" y="-204">
+			<label kind="invariant" x="-144" y="-238">duration &lt;= 1</label>
+		</location>
+		<init ref="id42"/>
+		<transition>
+			<source ref="id43"/>
+			<target ref="id42"/>
+			<label kind="guard" x="-280" y="-161">duration &gt;= 1</label>
+			<label kind="synchronisation" x="-263" y="-144">CmdACK!</label>
+			<nail x="-127" y="-144"/>
+			<nail x="-314" y="-144"/>
+		</transition>
+		<transition>
+			<source ref="id42"/>
+			<target ref="id43"/>
+			<label kind="synchronisation" x="-289" y="-221">SendCommand?</label>
+			<label kind="assignment" x="-297" y="-204">HandleCommand()</label>
+			<nail x="-153" y="-204"/>
+			<nail x="-153" y="-204"/>
+			<nail x="-144" y="-204"/>
+		</transition>
+		<transition>
+			<source ref="id41"/>
+			<target ref="id42"/>
+			<label kind="guard" x="-552" y="-161">duration &gt;= 3</label>
+			<label kind="synchronisation" x="-535" y="-144">FlashACK!</label>
+			<label kind="assignment" x="-603" y="-127">fws[firmware_Id].is_flashed = true</label>
+			<nail x="-612" y="-144"/>
+			<nail x="-365" y="-144"/>
+		</transition>
+		<transition>
+			<source ref="id42"/>
+			<target ref="id41"/>
+			<label kind="select" x="-536" y="-232">f_Id:int[0,1]</label>
+			<label kind="synchronisation" x="-552" y="-216">FlashFW[f_Id]?</label>
+			<label kind="assignment" x="-603" y="-195">firmware_Id = f_Id, duration = 0</label>
+		</transition>
+		<transition>
+			<source ref="id42"/>
+			<target ref="id42"/>
+			<label kind="synchronisation" x="-391" y="-272">CTRData!</label>
+			<nail x="-416" y="-255"/>
+			<nail x="-272" y="-256"/>
+		</transition>
+	</template>
+	<system>// Place template instantiations here.
+client1 = Client(1);
+client2 = Client(2);
+client3 = Client(3);
+client4 = Client(4);
+client5 = Client(5);
+dosReset = DoSReset();
+ddosReset = DDoSReset();
+dataReset = DataReset();
+cmdReset = CmdReset();
+cloud = Cloud();
+time_discretizer = Time_Discretizer();
+gateway = Gateway();
+gateway_int = GW_Internal();
+ot = OT();
+ctr = CTR();
+// List one or more processes to be composed into a system.
+//system client1, cloud, time_discretizer, dosReset;
+//system client1, client2, cloud, time_discretizer, ddosReset;
+//system ot, cloud, gateway, time_discretizer, dataReset;
+//system ot, ctr, time_discretizer, cmdReset;
+system client1, client2, client3, cloud, ot, ctr, gateway, gateway_int, time_discretizer;</system>
+	<queries>
+		<query>
+			<formula>Pr[&lt;=32500](&lt;&gt;((requests &gt; requestThreshold) and (thresholdCounter &gt; replies)))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>Pr[&lt;=1498](&lt;&gt;(dataStore &gt; 0))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>Pr[&lt;=32500](&lt;&gt;((expected_frequency &lt; current_time - cloudLastUpdate) &amp;&amp; ((expected_frequency - 2) &gt;= current_time - gwLastSync) &amp;&amp; gwPingSuccess))</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>A[] not deadlock</formula>
+			<comment></comment>
+		</query>
+		<query>
+			<formula>Pr[&lt;=32700](&lt;&gt;malicious_trace)</formula>
+			<comment></comment>
+		</query>
+	</queries>
+</nta>

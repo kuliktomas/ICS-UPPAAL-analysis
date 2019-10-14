@@ -1416,7 +1416,7 @@ ctr = CTR();
 system client1, client2, client3, cloud, ot, ctr, gateway, gateway_int, time_discretizer;</system>
 	<queries>
 		<query>
-			<formula>Pr[&lt;=32500](&lt;&gt;((requests &gt; requestThreshold) and (thresholdCounter &gt; replies)))</formula>
+			<formula>Pr[&lt;=32700](&lt;&gt;((requests &gt; requestThreshold) and (thresholdCounter &gt; replies)))</formula>
 			<comment></comment>
 		</query>
 		<query>
@@ -1424,11 +1424,7 @@ system client1, client2, client3, cloud, ot, ctr, gateway, gateway_int, time_dis
 			<comment></comment>
 		</query>
 		<query>
-			<formula>Pr[&lt;=32500](&lt;&gt;((expected_frequency &lt; current_time - cloudLastUpdate) &amp;&amp; ((expected_frequency - 2) &gt;= current_time - gwLastSync) &amp;&amp; gwPingSuccess))</formula>
-			<comment></comment>
-		</query>
-		<query>
-			<formula>A[] not deadlock</formula>
+			<formula>Pr[&lt;=32700](&lt;&gt;((expected_frequency &lt; current_time - cloudLastUpdate) &amp;&amp; ((expected_frequency - 2) &gt;= current_time - gwLastSync) &amp;&amp; gwPingSuccess))</formula>
 			<comment></comment>
 		</query>
 		<query>
